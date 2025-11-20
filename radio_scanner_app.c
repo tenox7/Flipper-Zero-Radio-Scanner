@@ -8,7 +8,7 @@
 
 #define TAG "RadioScannerApp"
 
-#define RADIO_SCANNER_DEFAULT_FREQ        433920000
+#define RADIO_SCANNER_DEFAULT_FREQ        310000000
 #define RADIO_SCANNER_DEFAULT_RSSI        (-100.0f)
 #define RADIO_SCANNER_DEFAULT_SENSITIVITY (-85.0f)
 #define RADIO_SCANNER_BUFFER_SZ           32
@@ -27,7 +27,7 @@ static void radio_scanner_draw_callback(Canvas* canvas, void* context) {
     RadioScannerApp* app = (RadioScannerApp*)context;
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Radio Scanner");
+    canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Radio Scanner 310");
 
     canvas_set_font(canvas, FontSecondary);
     char freq_str[RADIO_SCANNER_BUFFER_SZ + 1] = {0};
@@ -42,8 +42,11 @@ static void radio_scanner_draw_callback(Canvas* canvas, void* context) {
     snprintf(sensitivity_str, RADIO_SCANNER_BUFFER_SZ, "Sens: %.2f", (double)app->sensitivity);
     canvas_draw_str_aligned(canvas, 64, 42, AlignCenter, AlignTop, sensitivity_str);
 
-    canvas_draw_str_aligned(
-        canvas, 64, 54, AlignCenter, AlignTop, app->scanning ? "Scanning..." : "Locked");
+    const char* mod_names[] = {"OOK270", "OOK650", "2FSK238", "2FSK476"};
+    char status_str[RADIO_SCANNER_BUFFER_SZ + 1] = {0};
+    snprintf(status_str, RADIO_SCANNER_BUFFER_SZ, "%s %s",
+             mod_names[app->modulation], app->scanning ? "Scan" : "Lock");
+    canvas_draw_str_aligned(canvas, 64, 54, AlignCenter, AlignTop, status_str);
 #ifdef FURI_DEBUG
     FURI_LOG_D(TAG, "Exit radio_scanner_draw_callback");
 #endif
@@ -89,6 +92,31 @@ static void radio_scanner_update_rssi(RadioScannerApp* app) {
 #endif
 }
 
+static void radio_scanner_load_modulation(RadioScannerApp* app) {
+    FuriHalSubGhzPreset preset;
+    switch(app->modulation) {
+    case ModulationOok270:
+        preset = FuriHalSubGhzPresetOok270Async;
+        break;
+    case ModulationOok650:
+        preset = FuriHalSubGhzPresetOok650Async;
+        break;
+    case Modulation2FSKDev238:
+        preset = FuriHalSubGhzPreset2FSKDev238Async;
+        break;
+    case Modulation2FSKDev476:
+        preset = FuriHalSubGhzPreset2FSKDev476Async;
+        break;
+    default:
+        preset = FuriHalSubGhzPresetOok650Async;
+        break;
+    }
+    subghz_devices_load_preset(app->radio_device, preset, NULL);
+#ifdef FURI_DEBUG
+    FURI_LOG_D(TAG, "Loaded modulation: %d", app->modulation);
+#endif
+}
+
 static bool radio_scanner_init_subghz(RadioScannerApp* app) {
     furi_assert(app);
 #ifdef FURI_DEBUG
@@ -120,7 +148,7 @@ static bool radio_scanner_init_subghz(RadioScannerApp* app) {
 #ifdef FURI_DEBUG
     FURI_LOG_D(TAG, "Frequency is valid: %lu", app->frequency);
 #endif
-    subghz_devices_load_preset(device, FuriHalSubGhzPreset2FSKDev238Async, NULL);
+    radio_scanner_load_modulation(app);
 #ifdef FURI_DEBUG
     FURI_LOG_D(TAG, "Preset loaded");
 #endif
@@ -136,7 +164,7 @@ static bool radio_scanner_init_subghz(RadioScannerApp* app) {
         app->speaker_acquired = true;
         subghz_devices_set_async_mirror_pin(device, &gpio_speaker);
 #ifdef FURI_DEBUG
-        FURI_LOG_D(TAG, "Speaker acquired and async mirror pin set");
+        FURI_LOG_D(TAG, "Speaker acquired and audio enabled by default");
 #endif
     } else {
         app->speaker_acquired = false;
@@ -261,8 +289,9 @@ RadioScannerApp* radio_scanner_app_alloc() {
     app->frequency = RADIO_SCANNER_DEFAULT_FREQ;
     app->rssi = RADIO_SCANNER_DEFAULT_RSSI;
     app->sensitivity = RADIO_SCANNER_DEFAULT_SENSITIVITY;
-    app->scanning = true;
+    app->scanning = false;
     app->scan_direction = ScanDirectionUp;
+    app->modulation = ModulationOok650;
     app->speaker_acquired = false;
     app->radio_device = NULL;
 
@@ -401,14 +430,51 @@ int32_t radio_scanner_app(void* p) {
                     app->sensitivity -= 1.0f;
                     FURI_LOG_I(TAG, "Decreased sensitivity: %f", (double)app->sensitivity);
                 } else if(event.key == InputKeyLeft) {
-                    app->scan_direction = ScanDirectionDown;
-                    FURI_LOG_I(TAG, "Scan direction set to down");
+                    app->scanning = false;
+                    uint32_t new_frequency = app->frequency - SUBGHZ_FREQUENCY_STEP;
+                    if(subghz_devices_is_frequency_valid(app->radio_device, new_frequency)) {
+                        subghz_devices_flush_rx(app->radio_device);
+                        subghz_devices_stop_async_rx(app->radio_device);
+                        subghz_devices_idle(app->radio_device);
+                        app->frequency = new_frequency;
+                        subghz_devices_set_frequency(app->radio_device, app->frequency);
+                        subghz_devices_start_async_rx(app->radio_device, radio_scanner_rx_callback, app);
+                        FURI_LOG_I(TAG, "Manual frequency down: %lu", app->frequency);
+                    }
                 } else if(event.key == InputKeyRight) {
-                    app->scan_direction = ScanDirectionUp;
-                    FURI_LOG_I(TAG, "Scan direction set to up");
+                    app->scanning = false;
+                    uint32_t new_frequency = app->frequency + SUBGHZ_FREQUENCY_STEP;
+                    if(subghz_devices_is_frequency_valid(app->radio_device, new_frequency)) {
+                        subghz_devices_flush_rx(app->radio_device);
+                        subghz_devices_stop_async_rx(app->radio_device);
+                        subghz_devices_idle(app->radio_device);
+                        app->frequency = new_frequency;
+                        subghz_devices_set_frequency(app->radio_device, app->frequency);
+                        subghz_devices_start_async_rx(app->radio_device, radio_scanner_rx_callback, app);
+                        FURI_LOG_I(TAG, "Manual frequency up: %lu", app->frequency);
+                    }
                 } else if(event.key == InputKeyBack) {
                     app->running = false;
                     FURI_LOG_I(TAG, "Exiting app");
+                }
+            } else if(event.type == InputTypeLong) {
+                if(event.key == InputKeyLeft) {
+                    app->scan_direction = ScanDirectionDown;
+                    app->scanning = true;
+                    FURI_LOG_I(TAG, "Resume scanning down");
+                } else if(event.key == InputKeyRight) {
+                    app->scan_direction = ScanDirectionUp;
+                    app->scanning = true;
+                    FURI_LOG_I(TAG, "Resume scanning up");
+                } else if(event.key == InputKeyOk) {
+                    app->modulation = (app->modulation + 1) % ModulationCount;
+                    subghz_devices_flush_rx(app->radio_device);
+                    subghz_devices_stop_async_rx(app->radio_device);
+                    subghz_devices_idle(app->radio_device);
+                    radio_scanner_load_modulation(app);
+                    subghz_devices_set_frequency(app->radio_device, app->frequency);
+                    subghz_devices_start_async_rx(app->radio_device, radio_scanner_rx_callback, app);
+                    FURI_LOG_I(TAG, "Cycled modulation to: %d", app->modulation);
                 }
             }
         }

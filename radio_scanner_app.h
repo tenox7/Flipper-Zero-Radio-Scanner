@@ -9,6 +9,14 @@ typedef enum {
     ScanDirectionDown,
 } ScanDirection;
 
+typedef enum {
+    ModulationOok270,
+    ModulationOok650,
+    Modulation2FSKDev238,
+    Modulation2FSKDev476,
+    ModulationCount
+} ModulationType;
+
 typedef struct {
     Gui* gui;
     ViewPort* view_port;
@@ -19,6 +27,7 @@ typedef struct {
     float sensitivity;
     bool scanning;
     ScanDirection scan_direction;
+    ModulationType modulation;
     const SubGhzDevice* radio_device;
     bool speaker_acquired;
 } RadioScannerApp;
